@@ -1,0 +1,60 @@
+#pragma kernel CSMain
+
+RWTexture2D<float4> Result;
+
+StructuredBuffer<float2> Positions;
+int NumParticles;
+
+float2 BoundsSize;        // (width, height)
+float SmoothingRadius;
+float TargetDensity;
+float PressureMultiplier;
+float MaxAbsPressure;
+
+float4 NegColor;
+float4 ZeroColor;
+float4 PosColor;
+
+float SmoothingKernel(float radius, float dist)
+{
+    if (dist >= radius) return 0;
+    float volume = 3.14159265 * pow(radius, 4) / 6.0;
+    float q = radius - dist;
+    return (q*q) / volume;
+}
+
+float4 PressureToColor(float pressure)
+{
+    float t = saturate(abs(pressure) / max(1e-6, MaxAbsPressure));
+    // smoothstep
+    t = pow(t, 0.35);   // strong contrast (try 0.5, 0.35, 0.25)
+
+
+    return (pressure >= 0)
+        ? lerp(ZeroColor, PosColor, t)
+        : lerp(ZeroColor, NegColor, t);
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Result.GetDimensions(width, height);
+
+    if (id.x >= width || id.y >= height) return;
+
+    // Map pixel -> world position in bounds centered at (0,0)
+    float2 uv = (float2(id.xy) + 0.5) / float2(width, height);
+    float2 worldPos = (uv - 0.5) * BoundsSize;
+
+    float density = 0;
+    for (int i = 0; i < NumParticles; i++)
+    {
+        float dist = length(Positions[i] - worldPos);
+        density += SmoothingKernel(SmoothingRadius, dist);
+    }
+
+    float err = density / max(1e-6, TargetDensity) - 1.0;  // centered at 0
+    Result[int2(id.xy)] = PressureToColor(err);
+
+}
