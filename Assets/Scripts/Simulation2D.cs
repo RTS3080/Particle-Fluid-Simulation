@@ -398,6 +398,9 @@ public class DrawParticle : MonoBehaviour
                 }
             }
         }
+        float currDensity = densities[centerIndex];
+        pressureForce += CalculateBoundaryPressureForce(centerPoint, currDensity, boundaryPositionsX, sqrRadius);
+        pressureForce += CalculateBoundaryPressureForce(centerPoint, currDensity, boundaryPositionsY, sqrRadius);
         return pressureForce;
     }
     
@@ -423,6 +426,45 @@ public class DrawParticle : MonoBehaviour
         float pressureA = ConvertDensityToPressure(densityA);
         float pressureB = ConvertDensityToPressure(densityB);
         return (pressureA + pressureB) / 2;
+    }
+    
+    
+    float CalculateBoundaryDensity(Vector2 centerPoint, Vector2[] boundaryPoints, float sqrRadius)
+    {
+        float density = 0f;
+        for (int i = 0; i < boundaryPoints.Length; i++)
+        {
+            Vector2 offset = boundaryPoints[i] - centerPoint;
+            float sqrDist = offset.sqrMagnitude;
+            if (sqrDist <= sqrRadius)
+            {
+                float dist = offset.magnitude;
+                float influence = SmoothingKernel(smoothingRadius, dist);
+                density += influence * mass;
+            }
+        }
+        return density;
+    }
+
+    Vector2 CalculateBoundaryPressureForce(Vector2 centerPoint, float currentDensity, Vector2[] boundaryPoints, float sqrRadius)
+    {
+        Vector2 pressureForce = Vector2.zero;
+        float boundaryDensity = targetDensity;
+        float invBoundaryDensity = 1f / Max(1e-6f, boundaryDensity);
+        for (int i = 0; i < boundaryPoints.Length; i++)
+        {
+            Vector2 offset = boundaryPoints[i] - centerPoint;
+            float sqrDist = offset.sqrMagnitude;
+            if (sqrDist <= sqrRadius)
+            {
+                float dist = offset.magnitude;
+                Vector2 dir = dist == 0 ? GetRandomDir() : offset / dist;
+                float slope = SmoothingKernelDerivative(smoothingRadius, dist);
+                float sharedPressure = CalculateSharedPressure(boundaryDensity, currentDensity);
+                pressureForce += sharedPressure * slope * mass * invBoundaryDensity * dir;
+            }
+        }
+        return pressureForce;
     }
     
     
