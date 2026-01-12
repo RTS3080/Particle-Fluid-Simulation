@@ -155,11 +155,11 @@ MonoBehaviour:
   particleSize: 0.03
   particleSpacing: 0.05
   numParticles: 4032
-  smoothingRadius: 0.35
-  targetDensity: 5.2
-  pressureMultiplier: 27
+  smoothingRadius: 1
+  targetDensity: 1
+  pressureMultiplier: 0.5
   gravity: 0
-  collisionDamping: 0.35
+  collisionDamping: 0.9
   boundsSize: {x: 16, y: 9}
   mass: 1
   colorGradient:

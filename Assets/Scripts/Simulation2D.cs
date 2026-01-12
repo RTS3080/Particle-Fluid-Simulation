@@ -31,6 +31,7 @@ public class DrawParticle : MonoBehaviour
     [Range(0,1)] public float collisionDamping = 1f;
     public Vector2 boundsSize;
     public float mass = 1;
+    public float viscosityMultiplier = 1;
     public Gradient colorGradient;
     
     [Header("Walls")]
@@ -57,6 +58,7 @@ public class DrawParticle : MonoBehaviour
     public Vector2[] positions;
     public Vector2[] velocities;
     private float[] densities;
+    private float[] pressures;
     private Vector2[] predictedPositions;
     private float velocityMax;
     public Vector2[][] boundaryPositions;
@@ -107,6 +109,7 @@ public class DrawParticle : MonoBehaviour
         positions = new Vector2[numParticles];
         velocities = new Vector2[numParticles];
         densities = new float[numParticles];
+        pressures = new float[numParticles];
         startIndices = new int[numParticles];
         spatialLookup = new Entry[numParticles];
         predictedPositions = new Vector2[numParticles];
@@ -166,7 +169,7 @@ public class DrawParticle : MonoBehaviour
             return;
         }
         
-        SimulationStep(1/120f);
+        SimulationStep(Time.deltaTime);
         mousePos = Input.mousePosition;
         // densityVisualize.UpdatePressureFieldGPU(positions, densities, boundsSize, smoothingRadius, targetDensity);
         renderer.DrawRectOutline(Vector2.zero, boundsSize, 0.01f, Color.green);
@@ -306,22 +309,94 @@ public class DrawParticle : MonoBehaviour
     /// <summary>
     /// O(1)
     /// </summary>
-    static float SmoothingKernel(float smoothingRadius, float dist)
+    static float SmoothingKernel(float h, float r)
     {
-        if(dist >= smoothingRadius) return 0;
-        
-        float volume = 10 / (PI * Pow(smoothingRadius, 5));
-        return Pow(smoothingRadius - dist, 3) * volume;
+        float q = Abs(r / h);
+        float normalizationConstant = 3 / PI;
+        float value = 0;
+        if (q < 1)
+        {
+            value = 2f / 3 - (q * q) + 1 / 2f * Pow(q, 3);
+        }
+        else if (q < 2)
+        {
+            value = 1 / 6f * (2 - Pow(q, 3));
+        }
+        return value * normalizationConstant;
+    }
+
+    static float QuardaticSplineKernel(float smoothingRadius, float radius)
+    {
+        float q = Math.Max(0, Abs(radius / smoothingRadius));
+        float normalizationConstant = 1 / (2 * PI * smoothingRadius * smoothingRadius);
+        float value = 0;
+        if (q < 1)
+        {
+            value = (2 - q) * (2 - q) - 4 * (1 - q) * (1 - q);
+        }
+        else if (q <= 2)
+        {
+            value = (2 - q) * (2 - q);
+        }
+
+        return value * normalizationConstant;
+    }
+
+    static float WendlandC2Kernel(float smoothingRadius, float radius)
+    {
+        float q = Math.Abs(radius / smoothingRadius);
+        float normalizationConstant = 7 / (4 * PI * smoothingRadius * smoothingRadius);
+        float value = 0;
+        if (q <= 2)
+        {
+            value = Pow(1 - q / 2, 4) * (1 + 2 * q);
+        }
+        return value * normalizationConstant;
+    }
+
+    static float WendlandC2KernelGradient(float smoothingRadius, float radius)
+    {
+        float q = Math.Abs(radius/smoothingRadius);
+        float normalizationConstant = 7/ (4 * PI * Pow(smoothingRadius, 3));
+        float value = 0;
+        if (q <= 2)
+        {
+            value = (-5 * q * Pow(1 - q / 2, 3));
+        }
+
+        return value * normalizationConstant;
+    }
+
+    static float WendlandC2KernelLaplacian(float smoothingRadius, float radius)
+    {
+        float q = Math.Abs(radius / smoothingRadius);
+        float normalizationConstant = 35/ (4 * PI * Pow(smoothingRadius, 4));
+        float value = 0;
+        if (q <= 2)
+        {
+            value = Pow(1 - q / 2, 2) * ((5 * q - 4) / 2);
+        }
+        return value * normalizationConstant;
     }
 
 
-    static float SmoothingKernelDerivative(float smoothingRadius, float dist)
+    static float SmoothingKernelDerivative(float h, float r)
     {
-        if (dist >= smoothingRadius) return 0f;
-        
-        float scale = -30 / (Pow(smoothingRadius, 5) * PI);
-        return (smoothingRadius - dist) * (smoothingRadius - dist) * scale;
+        float q =  Abs(r / h);
+        float normalizationConstant = 15 / (7 * PI * Pow(h, 3));
+        float value = 0;
+        if (q < 1)
+        {
+            value = -2 * q + 3f / 2 * q * q;
+        }
+        else if (q < 2)
+        {
+            value = -1 / 2f * (2 - q) * (2 - q);
+        }
+        return value * normalizationConstant;
     }
+    
+    
 
     
     /// <summary>
@@ -349,7 +424,7 @@ public class DrawParticle : MonoBehaviour
                 if (sqrDist <= sqrRadius)
                 {
                     float dist = offset.magnitude;
-                    float influence = SmoothingKernel(smoothingRadius, dist); 
+                    float influence = WendlandC2Kernel(smoothingRadius, dist); 
                     density += influence * mass;
                 }
             }
@@ -402,6 +477,12 @@ public class DrawParticle : MonoBehaviour
         pressureForce += CalculateBoundaryPressureForce(centerPoint, currDensity, boundaryPositionsX, sqrRadius);
         pressureForce += CalculateBoundaryPressureForce(centerPoint, currDensity, boundaryPositionsY, sqrRadius);
         return pressureForce;
+    }
+    
+    const float c = 343f;
+    void updatePressures(int ind)
+    {
+        pressures[ind] = c * c * (densities[ind] - targetDensity);
     }
     
     Vector2 GetRandomDir()
@@ -466,8 +547,89 @@ public class DrawParticle : MonoBehaviour
         }
         return pressureForce;
     }
+
+    Vector2 CalculatePressureAcceleration(int centerIndex, Vector2[] points)
+    {
+        Vector2 centerPoint = points[centerIndex];
+        (int centerX, int centerY) = PositionToCellCoord(centerPoint, smoothingRadius);
+        float sqrRadius = smoothingRadius * smoothingRadius;
+        Vector2 pressureValue = Vector2.zero;
+        foreach ((int offsetX, int offsetY) in cellOffsets)
+        {
+            uint key = GetKeyFromHash(HashCell(centerX + offsetX, centerY + offsetY));
+            int cellStartIndex = startIndices[key];
+            for (int i = cellStartIndex; i < spatialLookup.Length; i++)
+            {
+                if (spatialLookup[i].key != key) break;
+                int particleIndex = spatialLookup[i].index;
+                if (particleIndex == centerIndex) continue;
+                
+                Vector2 offset = points[particleIndex] - centerPoint;
+                float sqrDist = offset.sqrMagnitude;
+                
+                if (sqrDist <= sqrRadius)
+                {
+                    float dist = offset.magnitude;
+                    Vector2 dir = dist == 0 ? GetRandomDir() : offset / dist;
+                    float slope = WendlandC2KernelGradient(smoothingRadius, dist);
+                    float pressure = CalculatePressureValue(centerIndex, particleIndex);
+                    pressureValue += pressure * slope * dir;
+                }
+            }
+        }
+        return pressureValue;
+    }
+
+    float CalculatePressureValue(int i, int j)
+    {
+        float densityi = densities[i];
+        float densityj = densities[j];
+        float pressurei = pressures[i];
+        float pressurej = pressures[j];
+        return -(mass / densityj) * (pressurei / (densityi * densityi) + pressurej / (densityj * densityj));
+    }
     
     
+    Vector2 CalculateViscosityAcceleration(int centerIndex, Vector2[] points)
+    {
+        Vector2 centerPoint = points[centerIndex];
+        (int centerX, int centerY) = PositionToCellCoord(centerPoint, smoothingRadius);
+        float sqrRadius = smoothingRadius * smoothingRadius;
+        Vector2 viscosityValue = Vector2.zero;
+        foreach ((int offsetX, int offsetY) in cellOffsets)
+        {
+            uint key = GetKeyFromHash(HashCell(centerX + offsetX, centerY + offsetY));
+            int cellStartIndex = startIndices[key];
+            for (int i = cellStartIndex; i < spatialLookup.Length; i++)
+            {
+                if (spatialLookup[i].key != key) break;
+                int particleIndex = spatialLookup[i].index;
+                if (particleIndex == centerIndex) continue;
+                
+                Vector2 offset = points[particleIndex] - centerPoint;
+                float sqrDist = offset.sqrMagnitude;
+                
+                if (sqrDist <= sqrRadius)
+                {
+                    float dist = offset.magnitude;
+                    Vector2 dir = dist == 0 ? GetRandomDir() : offset / dist;
+                    float laplacian = WendlandC2KernelLaplacian(smoothingRadius, dist);
+                    float visc = CalculateViscosityValue(centerIndex, particleIndex);
+                    viscosityValue += visc * laplacian * dir;
+                }
+            }
+        }
+        return viscosityValue;
+    }
+
+    float CalculateViscosityValue(int i, int j)
+    {
+        float densityi = densities[i];
+        float densityj = densities[j];
+        float velocityi = velocities[i].magnitude;
+        float velocityj = velocities[j].magnitude;
+        return -viscosityMultiplier * (mass / densityj) * (velocityi / (densityi * densityi) + velocityj / (densityj * densityj));
+    }
     // Converts a point position to the coordinate of the cell it is in
     public (int x, int y) PositionToCellCoord(Vector2 point, float radius)
     {
